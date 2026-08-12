@@ -1,7 +1,91 @@
+import AppKit
 import CoreAudio
 import Foundation
 
+struct AudioSourceOption: Identifiable, Equatable, Sendable {
+    static let system = AudioSourceOption(
+        id: "system",
+        name: "Весь системный звук",
+        bundleID: nil
+    )
+
+    let id: String
+    let name: String
+    let bundleID: String?
+    let processBundleIDs: [String]
+
+    init(id: String, name: String, bundleID: String?, processBundleIDs: [String] = []) {
+        self.id = id
+        self.name = name
+        self.bundleID = bundleID
+        self.processBundleIDs = processBundleIDs.isEmpty ? bundleID.map { [$0] } ?? [] : processBundleIDs
+    }
+}
+
 enum CoreAudioUtilities {
+    @MainActor
+    static func audioSources(excludingBundleID ownBundleID: String) throws -> [AudioSourceOption] {
+        struct DiscoveredSource {
+            var name: String
+            var processBundleIDs: Set<String>
+        }
+        var discoveredByID: [String: DiscoveredSource] = [:]
+
+        for objectID in try processObjectIDs() {
+            guard let bundleID = try? stringProperty(
+                objectID: objectID,
+                selector: kAudioProcessPropertyBundleID
+            ) else { continue }
+            guard !bundleID.isEmpty, bundleID != ownBundleID else { continue }
+
+            let pid = try pidProperty(objectID: objectID)
+            let runningApplication = NSRunningApplication(processIdentifier: pid)
+            let sourceID = parentApplicationBundleID(for: bundleID)
+            let sourceApplication = NSRunningApplication.runningApplications(
+                withBundleIdentifier: sourceID
+            ).first
+            guard sourceApplication?.activationPolicy == .regular else { continue }
+
+            let name = sourceApplication?.localizedName
+                ?? applicationName(bundleID: sourceID)
+                ?? runningApplication?.localizedName
+                ?? applicationName(bundleID: bundleID)
+                ?? sourceID
+            var discovered = discoveredByID[sourceID]
+                ?? DiscoveredSource(name: name, processBundleIDs: [])
+            discovered.processBundleIDs.insert(sourceID)
+            discovered.processBundleIDs.insert(bundleID)
+            if bundleID == sourceID {
+                discovered.name = name
+            }
+            discoveredByID[sourceID] = discovered
+        }
+
+        let applications = discoveredByID.map { sourceID, discovered in
+            AudioSourceOption(
+                id: sourceID,
+                name: discovered.name,
+                bundleID: sourceID,
+                processBundleIDs: Array(discovered.processBundleIDs).sorted()
+            )
+        }.sorted {
+            $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }
+
+        return [.system] + applications
+    }
+
+    static func processObjectIDs(bundleIDs: [String]) throws -> [AudioObjectID] {
+        let bundleIDs = Set(bundleIDs)
+        return try processObjectIDs().filter {
+            guard let bundleID = try? stringProperty(
+                objectID: $0,
+                selector: kAudioProcessPropertyBundleID
+            ) else { return false }
+            return bundleIDs.contains(bundleID)
+        }
+    }
+
     static func defaultOutputDeviceID() throws -> AudioObjectID {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDefaultOutputDevice,
@@ -164,6 +248,83 @@ enum CoreAudioUtilities {
         return streamIDs
     }
 
+    private static func processObjectIDs() throws -> [AudioObjectID] {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyProcessObjectList,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let systemObjectID = AudioObjectID(kAudioObjectSystemObject)
+        var size: UInt32 = 0
+        try check(
+            AudioObjectGetPropertyDataSize(systemObjectID, &address, 0, nil, &size),
+            operation: "Не удалось прочитать список источников звука"
+        )
+
+        let stride = UInt32(MemoryLayout<AudioObjectID>.size)
+        guard size % stride == 0 else {
+            throw CoreAudioDataError.invalidProcessList
+        }
+        guard size > 0 else { return [] }
+
+        var objectIDs = [AudioObjectID](
+            repeating: AudioObjectID(kAudioObjectUnknown),
+            count: Int(size / stride)
+        )
+        try objectIDs.withUnsafeMutableBufferPointer { buffer in
+            guard let baseAddress = buffer.baseAddress else {
+                throw CoreAudioDataError.invalidProcessList
+            }
+            try check(
+                AudioObjectGetPropertyData(
+                    systemObjectID,
+                    &address,
+                    0,
+                    nil,
+                    &size,
+                    baseAddress
+                ),
+                operation: "Не удалось прочитать список источников звука"
+            )
+        }
+        return objectIDs
+    }
+
+    private static func pidProperty(objectID: AudioObjectID) throws -> pid_t {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioProcessPropertyPID,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var value: pid_t = 0
+        var size = UInt32(MemoryLayout<pid_t>.size)
+        try check(
+            AudioObjectGetPropertyData(objectID, &address, 0, nil, &size, &value),
+            operation: "Не удалось определить приложение источника"
+        )
+        return value
+    }
+
+    @MainActor
+    private static func applicationName(bundleID: String) -> String? {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID),
+              let bundle = Bundle(url: url) else {
+            return nil
+        }
+        return bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
+            ?? bundle.object(forInfoDictionaryKey: "CFBundleName") as? String
+    }
+
+    private static func parentApplicationBundleID(for bundleID: String) -> String {
+        if bundleID.hasSuffix(".helper") {
+            return String(bundleID.dropLast(".helper".count))
+        }
+        if let range = bundleID.range(of: ".helper.") {
+            return String(bundleID[..<range.lowerBound])
+        }
+        return bundleID
+    }
+
     static func createPrivateAggregateDevice(
         outputDeviceUID: String,
         tapUID: String
@@ -205,12 +366,15 @@ enum CoreAudioUtilities {
 
 private enum CoreAudioDataError: LocalizedError {
     case invalidAudioFormat
+    case invalidProcessList
     case invalidStreamList
 
     var errorDescription: String? {
         switch self {
         case .invalidAudioFormat:
             "macOS вернула некорректный формат аудиопотока"
+        case .invalidProcessList:
+            "macOS вернула некорректный список источников звука"
         case .invalidStreamList:
             "macOS вернула некорректный список аудиопотоков"
         }

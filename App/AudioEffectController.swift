@@ -18,7 +18,7 @@ final class AudioEffectController {
         running
     }
 
-    func start(parameters: EffectParameters) throws {
+    func start(parameters: EffectParameters, source: AudioSourceOption) throws {
         guard !running else {
             apply(parameters)
             return
@@ -32,15 +32,37 @@ final class AudioEffectController {
                 objectID: outputDeviceID,
                 selector: kAudioDevicePropertyDeviceUID
             )
-            let description = CATapDescription(
-                excludingProcesses: [],
-                deviceUID: outputDeviceUID,
-                stream: 0
-            )
-            description.name = "NextDoor System Audio"
+            let description: CATapDescription
+            if let bundleID = source.bundleID {
+                let processObjectIDs = try CoreAudioUtilities.processObjectIDs(
+                    bundleIDs: source.processBundleIDs
+                )
+                guard !processObjectIDs.isEmpty else {
+                    throw AudioEffectError.configuration(
+                        "\(source.name) сейчас не воспроизводит звук"
+                    )
+                }
+                description = CATapDescription(
+                    processes: processObjectIDs,
+                    deviceUID: outputDeviceUID,
+                    stream: 0
+                )
+                description.bundleIDs = source.processBundleIDs.isEmpty
+                    ? [bundleID]
+                    : source.processBundleIDs
+            } else {
+                description = CATapDescription(
+                    excludingProcesses: [],
+                    deviceUID: outputDeviceUID,
+                    stream: 0
+                )
+                description.bundleIDs = [
+                    Bundle.main.bundleIdentifier ?? "com.aleksandr.NextDoor"
+                ]
+            }
+            description.name = "NextDoor — \(source.name)"
             description.isPrivate = true
             description.muteBehavior = .mutedWhenTapped
-            description.bundleIDs = [Bundle.main.bundleIdentifier ?? "com.aleksandr.NextDoor"]
             description.isProcessRestoreEnabled = true
 
             try CoreAudioUtilities.check(
@@ -130,7 +152,7 @@ final class AudioEffectController {
             running = true
             log(parameters)
             logger.notice(
-                "Direct tap started at \(inputLayout.sampleRate, privacy: .public) Hz; microphone is excluded"
+                "Direct tap started for \(source.id, privacy: .public) at \(inputLayout.sampleRate, privacy: .public) Hz; microphone is excluded"
             )
         } catch {
             stop()

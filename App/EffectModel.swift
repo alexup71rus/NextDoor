@@ -46,6 +46,8 @@ final class EffectModel: ObservableObject {
     @Published private(set) var status = "Готов"
     @Published private(set) var namedPresets: [EffectPreset]
     @Published private(set) var selectedPresetID = EffectModel.lastPresetID
+    @Published private(set) var availableSources: [AudioSourceOption]
+    @Published private(set) var selectedSourceID: String
 
     @Published var wall: Double {
         didSet { parametersDidChange() }
@@ -79,6 +81,9 @@ final class EffectModel: ObservableObject {
         static let echo = "effect.v3.echo"
         static let boost = "effect.v3.boost"
         static let namedPresets = "effect.v3.namedPresets"
+        static let sourceID = "effect.v4.sourceID"
+        static let sourceName = "effect.v4.sourceName"
+        static let sourceBundleIDs = "effect.v4.sourceBundleIDs"
     }
 
     private let defaults: UserDefaults
@@ -88,6 +93,27 @@ final class EffectModel: ObservableObject {
 
     private init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+
+        let storedSourceID = defaults.string(forKey: DefaultsKey.sourceID)
+            ?? AudioSourceOption.system.id
+        let storedSourceName = defaults.string(forKey: DefaultsKey.sourceName)
+            ?? "Выбранное приложение"
+        let storedSourceBundleIDs = defaults.stringArray(forKey: DefaultsKey.sourceBundleIDs)
+            ?? [storedSourceID]
+        selectedSourceID = storedSourceID
+        if storedSourceID == AudioSourceOption.system.id {
+            availableSources = [.system]
+        } else {
+            availableSources = [
+                .system,
+                AudioSourceOption(
+                    id: storedSourceID,
+                    name: storedSourceName,
+                    bundleID: storedSourceID,
+                    processBundleIDs: storedSourceBundleIDs
+                )
+            ]
+        }
 
         let fallback = Self.defaultParameters
         let storedLast = EffectParameters(
@@ -123,6 +149,45 @@ final class EffectModel: ObservableObject {
             echo: echo,
             boost: boost
         ).clamped
+    }
+
+    var selectedSource: AudioSourceOption {
+        availableSources.first(where: { $0.id == selectedSourceID }) ?? .system
+    }
+
+    func refreshSources() {
+        do {
+            let ownBundleID = Bundle.main.bundleIdentifier ?? "com.aleksandr.NextDoor"
+            var sources = try CoreAudioUtilities.audioSources(excludingBundleID: ownBundleID)
+            if selectedSourceID != AudioSourceOption.system.id,
+               !sources.contains(where: { $0.id == selectedSourceID }) {
+                sources.append(selectedSource)
+            }
+            availableSources = sources
+            if let selected = sources.first(where: { $0.id == selectedSourceID }) {
+                persistSource(selected)
+            }
+        } catch {
+            if !isEnabled {
+                status = error.localizedDescription
+            }
+        }
+    }
+
+    func selectSource(id: String) {
+        guard id != selectedSourceID,
+              let source = availableSources.first(where: { $0.id == id }) else {
+            return
+        }
+
+        selectedSourceID = id
+        persistSource(source)
+
+        if isEnabled {
+            restartForSourceChange()
+        } else {
+            status = source.bundleID == nil ? "Готов" : "Источник: \(source.name)"
+        }
     }
 
     func toggle() async {
@@ -198,11 +263,12 @@ final class EffectModel: ObservableObject {
     private func enable() {
         isBusy = true
         status = "Подключаю системный звук…"
+        refreshSources()
 
         do {
-            try audioController.start(parameters: parameters)
+            try audioController.start(parameters: parameters, source: selectedSource)
             isEnabled = true
-            status = "Весь звук играет за стеной"
+            status = sourceStatus
         } catch {
             audioController.stop()
             isEnabled = false
@@ -218,6 +284,36 @@ final class EffectModel: ObservableObject {
         isEnabled = false
         status = "Обычный звук"
         isBusy = false
+    }
+
+    private func restartForSourceChange() {
+        isBusy = true
+        audioController.stop()
+
+        do {
+            try audioController.start(parameters: parameters, source: selectedSource)
+            isEnabled = true
+            status = sourceStatus
+        } catch {
+            audioController.stop()
+            isEnabled = false
+            status = error.localizedDescription
+        }
+
+        isBusy = false
+    }
+
+    private var sourceStatus: String {
+        if selectedSource.bundleID == nil {
+            return "Весь звук играет за стеной"
+        }
+        return "За стеной: \(selectedSource.name)"
+    }
+
+    private func persistSource(_ source: AudioSourceOption) {
+        defaults.set(source.id, forKey: DefaultsKey.sourceID)
+        defaults.set(source.name, forKey: DefaultsKey.sourceName)
+        defaults.set(source.processBundleIDs, forKey: DefaultsKey.sourceBundleIDs)
     }
 
     private func apply(

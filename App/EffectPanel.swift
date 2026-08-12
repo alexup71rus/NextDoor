@@ -10,6 +10,8 @@ struct EffectPanel: View {
         VStack(spacing: 16) {
             header
 
+            sourceControls
+
             presetControls
 
             Divider()
@@ -76,6 +78,52 @@ struct EffectPanel: View {
         }
         .padding(18)
         .frame(width: 360)
+        .onAppear {
+            model.refreshSources()
+        }
+    }
+
+    private var sourceControls: some View {
+        HStack(spacing: 8) {
+            Text("Источник")
+                .foregroundStyle(.secondary)
+
+            Spacer(minLength: 8)
+
+            Menu {
+                ForEach(model.availableSources) { source in
+                    Button {
+                        model.selectSource(id: source.id)
+                    } label: {
+                        if source.id == model.selectedSourceID {
+                            Label(source.name, systemImage: "checkmark")
+                        } else {
+                            Text(source.name)
+                        }
+                    }
+                }
+
+                Divider()
+
+                Button("Обновить список", systemImage: "arrow.clockwise") {
+                    model.refreshSources()
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Text(model.selectedSource.name)
+                        .lineLimit(1)
+
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .menuStyle(.borderlessButton)
+        }
+        .padding(.horizontal, 9)
+        .frame(maxWidth: .infinity, minHeight: 28)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+        .disabled(model.isBusy)
     }
 
     private var presetControls: some View {
