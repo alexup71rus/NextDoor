@@ -1,12 +1,10 @@
-# Behind the Wall
+# NextDoor
 
 <p align="center">
   <img src="App/Assets.xcassets/AppIcon.appiconset/icon_128x128@2x.png" width="128" alt="Behind the Wall app icon">
 </p>
 
 A native macOS menu bar app that makes music sound as if it were playing in the next room. Behind the Wall combines a strong low-pass filter, bass emphasis, room reflections, echo, distance attenuation, and optional output gain.
-
-The app is called **«За стеной»** in the macOS interface and **NextDoor** internally.
 
 ## Features
 
