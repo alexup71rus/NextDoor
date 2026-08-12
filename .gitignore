@@ -1,0 +1,13 @@
+.DS_Store
+**/.DS_Store
+
+# Xcode user state and build output
+DerivedData/
+build/
+*.xcuserstate
+xcuserdata/
+
+# Local deliverables and working files
+NextDoor.app/
+NextDoor-macOS26.zip
+work/
